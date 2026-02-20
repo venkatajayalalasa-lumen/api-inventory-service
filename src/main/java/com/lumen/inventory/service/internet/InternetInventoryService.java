@@ -4,7 +4,6 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonMappingException;
 import com.lumen.error.enums.ErrorCode;
 import com.lumen.error.exception.ProcessingException;
-import com.lumen.inventory.config.client.SnowClient;
 import com.lumen.inventory.dto.InventoryQueryParams;
 import com.lumen.inventory.dto.responses.GetInventoryResponse;
 import com.lumen.inventory.dto.responses.Product;
@@ -12,6 +11,8 @@ import com.lumen.inventory.dto.responses.ServiceInventory;
 import com.lumen.inventory.service.enrichement.InventoryEnrichmentService;
 import com.lumen.inventory.service.enrichement.LocationEnrichmentService;
 import com.lumen.inventory.service.mapper.InventoryMapper;
+import com.lumen.snow.service.SNOWRestClient;
+
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
@@ -47,7 +48,7 @@ import java.util.stream.Collectors;
 public class InternetInventoryService {
 
     @Autowired
-    private SnowClient snowClient;
+    private SNOWRestClient snowRestClient;
 
     @Autowired
     private InventoryEnrichmentService inventoryEnrichmentService;
@@ -74,7 +75,7 @@ public class InternetInventoryService {
      */
     public ResponseEntity<GetInventoryResponse> getInventoryInternetList(InventoryQueryParams queryParams) {
         log.info("Processing Internet inventory request");
-        List<String> customerNumbers = queryParams.customerNumbers();
+        List<String> customerNumbers = queryParams.customerNumbers();//Retrieves the list of customer numbers from the query parameters.
         ResponseEntity<GetInventoryResponse> responseEntity;
         try {
             responseEntity = getInternetServiceInformation(String.join(",", customerNumbers));
@@ -82,10 +83,11 @@ public class InternetInventoryService {
             log.error("Error occurred while retrieving Internet service information", e);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                     .body(new GetInventoryResponse());
-        }
+        }//Tries to fetch and enrich inventory data for the given customers and handles any exceptions that may occur during this process.
         GetInventoryResponse enrichedResponse = responseEntity.getBody();
         GetInventoryResponse inventoryResponse = new GetInventoryResponse();
         inventoryResponse.setInventoryList(new ArrayList<>());
+        //Gets the body of the response (the enriched inventory). Initializes a new response object with an empty inventory list.
         if (enrichedResponse != null) {
             inventoryResponse.setInventoryList(enrichedResponse.getInventoryList());
             if (queryParams.serviceId() != null && queryParams.serviceId().isPresent()) {
@@ -95,8 +97,11 @@ public class InternetInventoryService {
                 inventoryResponse.setInventoryList(filteredList);
             }
             return new ResponseEntity<>(inventoryResponse, responseEntity.getStatusCode());
+            //If the enriched response is not null, copies its inventory list to the new response.
+            //If a serviceId is present in the query, filters the inventory list to only include items with a matching service ID.
+            //Returns the filtered (or unfiltered) inventory response with the original HTTP status.
         }
-        return responseEntity;
+        return responseEntity;//If the enriched response was null, returns the original response as is.
     }
 
     /**
@@ -119,31 +124,38 @@ public class InternetInventoryService {
      */
     private ResponseEntity<GetInventoryResponse> getInternetServiceInformation(String distinctCustNumbersFromCustAcct)
             throws JsonMappingException, JsonProcessingException, InterruptedException {
-        log.info("getInternetServiceInformation   snowClient call starting");
-        ResponseEntity<String> responseEntity = snowClient.getInventoryInternetInformationBasedOnMultipleCustomers(
-            distinctCustNumbersFromCustAcct, Optional.of(100), Optional.of(20), Integer.parseInt(naasInventoryDetailMaxPageSize), Optional.empty());
-        log.info("getInternetServiceInformation   snowClient call ended");//end of the ServiceNow API call, and fetches raw inventory data for the given customer numbers.
+        log.info("getInternetServiceInformation   snowRestClient call starting");
+        ResponseEntity<String> responseEntity = snowRestClient.getInventoryInternetInformationBasedOnMultipleCustomers(
+            //Calls the ServiceNow client to fetch raw inventory data for the given customer numbers, with pagination and page size parameters.
+            distinctCustNumbersFromCustAcct, Optional.of(100), Optional.of(20), naasInventoryDetailMaxPageSize, Optional.empty()).block();
+        log.info("getInternetServiceInformation   snowRestClient call ended");
         if (responseEntity != null && responseEntity.getBody() != null) {
-            List<Product> productList = InventoryMapper.mapJsonToProductList(responseEntity.getBody());
-            List<String> banList = InventoryMapper.getDistinctAlternateNumbersFromSnow(productList);//parses the response into a list of Product objects and extracts alternate numbers (BANs) from the products.
+            List<Product> productList = InventoryMapper.mapJsonToProductList(responseEntity.getBody());//Maps the JSON response body to a list of Product objects.
+            List<String> banList = InventoryMapper.getDistinctAlternateNumbersFromSnow(productList);//Extracts a list of distinct alternate numbers (BANs) from the product list.
             log.info("getInternetServiceInformation  fillBanHashMapByCallingAMService multithreading starting");
+            //AM Enrichement Process starts here - using multithreading to call AM service for each BAN in parallel and build a map of alternate number to invoice display customer number.
             ConcurrentHashMap<String, String> mapAlternateToInvoiceDisplayCustomerNumber = inventoryEnrichmentService.fillBanHashMapByCallingAMService(banList);
+            //Calls the enrichment service to map alternate numbers to invoice display customer numbers, possibly using multithreading.
             log.info("getInternetServiceInformation  fillBanHashMapByCallingAMService multithreading ended");
             List<ServiceInventory> serviceInventoryList = inventoryEnrichmentService.enrichProductList(
                     productList,
                     mapAlternateToInvoiceDisplayCustomerNumber,
                     productOfferingNameForSnow
-            );
+            );//Enriches the product list with additional data, producing a list of ServiceInventory objects.
             if (serviceInventoryList != null && !serviceInventoryList.isEmpty()) {
                 GetInventoryResponse getInventoryResponse = new GetInventoryResponse();
                 getInventoryResponse.setInventoryList(serviceInventoryList);
+                //Creates a new response object and sets its inventory list.
                 locationEnrichmentService.enrichLocationInformation(getInventoryResponse);
+                //Further enriches the response with location information. (GLM)
                 log.info("getInternetServiceInformation GetInventory   getInternetServiceInformation method ended");
                 return new ResponseEntity<>(getInventoryResponse, HttpStatus.OK);
             } else {
                 throw new ProcessingException(ErrorCode.NOT_FOUND, "No Internet inventory records found after enrichment for customers: " + distinctCustNumbersFromCustAcct);
+                // no data after enrichment.
             }
         }
         throw new ProcessingException(ErrorCode.NOT_FOUND, "No ServiceNow response or empty body for customers: " + distinctCustNumbersFromCustAcct);
+        //no data received from ServiceNow.
     }
 }

@@ -29,54 +29,48 @@ public class LocationEnrichmentService {
         log.info("GLM started");
         log.error("GetInventory  getLocationInformation started");
         try {
-            List<ServiceInventory> serviceInventoryList = getInventoryResponse.getInventoryList();
+            List<ServiceInventory> serviceInventoryList = getInventoryResponse.getInventoryList();//Retrieves the list of ServiceInventory objects from the response.
             if (serviceInventoryList != null && !serviceInventoryList.isEmpty()) {
                 List<String> glmList = serviceInventoryList.stream()
                         .filter(y -> y.getLocation() != null)
                         .map(x -> x.getLocation().getMasterSiteid())
                         .distinct()
-                        .collect(Collectors.toList());
+                        .collect(Collectors.toList());//Collects a distinct list of all masterSiteid values from inventory items that have a location.
                 log.info("GLM id count {}", glmList.size());
                 log.info("glm List {}", glmList);
                 if (!glmList.isEmpty()) {
                     log.info("GetInventory  getLocationInformation thread started");
                     List<com.lumen.glm.dto.ServiceLocation> glmResponses = glmRestClient.getLocationInformationForList(glmList).block();
+                    //Calls the GLM REST client to fetch location information for all IDs (blocking call).
                     List<com.lumen.glm.dto.ServiceLocation> siteLocationList = new ArrayList<>();
                     if (glmResponses != null) {
                         siteLocationList.addAll(glmResponses);
-                    }
+                    }//Initializes a list for site locations and adds all responses if not null.
                     log.info("GLM Processing Completed");
                     log.info("Size of GLM Response returned {}", siteLocationList.size());
                     log.info("Size of service Inventory {}", serviceInventoryList.size());
                     for (ServiceInventory serviceInventoryIterator : serviceInventoryList) {
                         if (serviceInventoryIterator.getLocation() != null && StringUtils.hasLength(serviceInventoryIterator.getLocation().getMasterSiteid())) {
+                            //Iterates over each inventory item, checking if it has a location and a non-empty masterSiteid.
                             List<com.lumen.glm.dto.ServiceLocation> filteredSiteLocationList = siteLocationList.stream()
                                     .filter(x -> x.getMasterSiteId().equalsIgnoreCase(serviceInventoryIterator.getLocation().getMasterSiteid()))
                                     .collect(Collectors.toList());
+                                    //Filters the site locations to those matching the current inventory item's masterSiteid.
                             log.info("Checking for MasterSiteId if present {} is present {}", serviceInventoryIterator.getLocation().getMasterSiteid(), filteredSiteLocationList.isEmpty());
                             if (!filteredSiteLocationList.isEmpty()) {
                                 com.lumen.glm.dto.ServiceLocation siteLocation = filteredSiteLocationList.get(0);
                                 Address address = new Address();
                                 address.setMasterSiteid(siteLocation.getMasterSiteId());
-                                // Enrich with as many fields as possible from ServiceLocation
-                                address.setStreetAddress(siteLocation.getDescription());
-                                address.setStateOrProvince(siteLocation.getSiteStatusType());
-                                address.setPostcode(siteLocation.getUSZip4());
-                                // Example: enrich with nested AddressLine1 if available
+                                //Logs whether a matching site location was found. If found, gets the first match and creates a new Address object, setting its masterSiteid.
                                 if (siteLocation.getAddressLine1() != null) {
-                                    address.setAddressLine1(siteLocation.getAddressLine1().getAddressBlock1());
+                                    address.setStreetAddress(siteLocation.getAddressLine1().getAddressLine1and2Combined());
+                                    address.setCity(siteLocation.getAddressLine1().getCity());
+                                    address.setStateOrProvince(siteLocation.getAddressLine1().getStateId());
+                                    address.setCountry(siteLocation.getAddressLine1().getAddressBlock3());
+                                    address.setPostcode(siteLocation.getAddressLine1().getPostalCode());
                                 }
-                                // Example: enrich with nested Address if available
-                                if (siteLocation.getAddresses() != null && !siteLocation.getAddresses().isEmpty()) {
-                                    address.setAddressBlock2(siteLocation.getAddresses().get(0).getAddressBlock2());
-                                }
-                                // Example: enrich with building info if available
-                                if (siteLocation.getBuilding() != null) {
-                                    address.setBuildingName(siteLocation.getBuilding().getBuildingName());
-                                }
-                                // Add more mappings as needed for your Address DTO
-                                // (e.g., country, city, extension, etc.)
                                 serviceInventoryIterator.setLocation(address);
+                                //If the site location has address details, sets them on the new Address object, then updates the inventory item's location with this enriched address.
                             }
                         }
                     }
